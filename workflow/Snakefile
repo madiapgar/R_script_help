@@ -1,0 +1,16 @@
+rule all:
+    input:
+        "plots/figure_1.tsv"
+
+rule make_fig_1:
+    input:
+        meta = "data/metadata.tsv",
+        biom = "data/biom.biom"
+    output:
+        plot = "plots/figure_1.tsv"
+    shell:
+        """
+        Rscript scripts/argparse_test.R --biom {input.biom} \
+                                        --meta {input.meta} \
+                                        --output {output.plot}
+        """

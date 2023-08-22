@@ -1,0 +1,226 @@
+---
+title: "template_microshades_taxabarplot"
+author: "Madi"
+date: "2023-05-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(qiime2R)
+library(tidyverse)
+library(cowplot)
+library(magrittr)
+library(viridis)
+library(microshades)
+library(phyloseq)
+```
+
+**These Functions Are Not Needed Anymore**
+Keeping these for the future in case I need them but I most likely won't. 
+```{r}
+# ## otu table prep with missing samples 
+# ## assumes that you're reading in a 'tsv' file 
+# otu_phyloseq_prep <- function(otu_fp, missing_samples){
+#   otu_table <- read_tsv(file = otu_fp)
+#   otu_table %>% 
+#     gather(-asv, key = sample, value = count) %>% 
+#     filter(sample %in% missing_sample) %>% 
+#     spread(sample, count) -> otu_missing
+#   names(otu_missing)[names(otu_missing) == 'asv'] <- ' '
+#   otu_missing <- as.matrix(otu_missing)
+#   class(otu_missing) <- "numeric"
+#   return(otu_missing)
+# }
+# 
+# ## tax table prep with missing samples 
+# ## assumes that its a 'qza' file from qiime2
+# tax_table_prep <- function(taxonomy_fp, wanted_asvs){
+#   tax_table <- read_qza(taxonomy_fp)$data 
+#   tax_table %>% 
+#     parse_taxonomy() %>% 
+#     as_tibble(rownames = 'asv') %>%
+#     filter(asv %in% wanted_asvs) -> tax_missing
+#   names(tax_missing)[names(tax_missing) == 'asv'] <- ' '
+#   return(tax_missing)
+# }
+# 
+# ## putting entire taxa barplot together
+# whole_tax_barplot <- function(tax_barplot, tax_barplot_legend){
+#   tax_all <- plot_grid(tax_barplot, tax_barplot_legend,  rel_widths = c(1, .25),
+#                        align = 'tblr',
+#                        axis = 'tblr')
+#   return(tax_all)
+# }
+```
+
+**Overall Functions Needed for the Giant End Function**
+These are in order of their use in the end-product function and will be used in the overall snakemake workflow. 
+```{r}
+## this assumes that you're reading in a qiime2 'qza' file
+## this also doesn't filter out anything for you 
+## but you usually shouldn't need the filtration steps
+
+micro_file_prep <- function(metadata_fp,
+                            otu_table_fp,
+                            tax_table_fp){
+  ## metadata file prep 
+  tmpMeta <- read_tsv(metadata_fp, n_max = 2)
+  mycols <- colnames(tmpMeta)
+  metadata <- read_tsv(metadata_fp, skip = 2, col_names = mycols)
+  names(metadata)[names(metadata) == '#SampleID'] <- 'sampleid'
+  metadata <- as.data.frame(metadata)
+  rownames(metadata) <- metadata$sampleid
+  ## otu file prep
+  otu_table <- read_qza(file = otu_fp)$data
+  ## taxonomy file prep
+  tax_table <- read_qza(file = tax_fp)$data %>% 
+    parse_taxonomy()
+  tax_table %>% 
+    filter(rownames(tax_table) %in% rownames(otu_table)) -> tax_table
+  ## creating my named list 
+  my_list <- list(Metadata = metadata,
+                  OTUTable = otu_table,
+                  Taxonomy = tax_table)
+  return(my_list)
+}
+# 
+# 
+# pseq <- phyloseq(otu_table(pseq_otu, taxa_are_rows = TRUE),
+#                  tax_table(as.matrix(pseq_tax)),
+#                  sample_data(pseq_meta))
+
+## generating color palettes based on the phyloseq object you generated
+## generate pseq like normal since there's already a nice function for it 
+## just returns the color_objs_GP for you, you'll need to extract the mdf/cdf for the next function 
+mdf_cdf_gp <- function(pseq, tax_table, tax_rank, tax_subgroup){
+  pseq %>% 
+  tax_glom(tax_subgroup) %>% 
+    phyloseq::transform_sample_counts(function(x) {
+     x/sum(x)
+      }) %>% 
+    psmelt() %>% 
+  filter(Abundance > 0) -> mdf_prep
+  phylum_table <- tax_glom(pseq, taxrank=tax_rank, ) %>% otu_table()
+  phyla.otunames <- rownames(phylum_table)
+  phylums <- tax_table(as.matrix(tax_table))[phyla.otunames,tax_rank]
+  sorted_phylums <- phylums[order(rowSums(phylum_table), decreasing=T)]
+## can take ranked phylums out if you don't have issues with top abund. phylums being repeated
+## ranked_phylums <- sort(unique(sorted_phylums[40:1]))
+  color_objs_GP <- create_color_dfs(mdf_prep,
+                                 subgroup_level = tax_subgroup,
+                                 selected_groups = sorted_phylums[5:1])
+  return(color_objs_GP)
+}
+
+tax_barplot <- function(mdf_GP, cdf_GP){
+  barplot <- plot_microshades(mdf_GP, cdf_GP)
+  barplot_1 <- barplot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+    theme_bw(base_size = 18) +
+    theme(legend.position = "none") +
+    theme(axis.text.x = element_blank())
+  return(barplot_1)
+}
+
+tax_barplot_legend <- function(mdf_GP, cdf_GP, tax_subgroup){
+  GP_legend <-custom_legend(mdf_GP, cdf_GP, 
+                          legend_key_size=unit(0.4, "cm"),
+                          legend_text_size=15, subgroup_level=tax_subgroup)
+  return(GP_legend)
+}
+
+```
+
+**Putting all microshades functions into a giant function to create a mini-pipeline**
+```{r}
+microshades_tax_barplot <- function(meta_fp, 
+                                    otu_fp, 
+                                    tax_fp,
+                                    tax_rank, 
+                                    tax_subgroup,
+                                    title_text, 
+                                    y_text){
+  pseq_files <- micro_file_prep(meta_fp,
+                                otu_fp,
+                                tax_fp)
+  pseq_meta <- pseq_files$Metadata
+  pseq_otu <- pseq_files$OTUTable
+  pseq_tax <- pseq_files$Taxonomy 
+  pseq <- phyloseq(otu_table(pseq_otu, taxa_are_rows = TRUE),
+                 tax_table(as.matrix(pseq_tax)),
+                 sample_data(pseq_meta))
+  mdf_and_cdf <- mdf_cdf_gp(pseq, 
+                            pseq_tax, 
+                            tax_rank, 
+                            tax_subgroup)
+  mdf_GP <- mdf_and_cdf$mdf
+  cdf_GP <- mdf_and_cdf$cdf
+  main_barplot <- tax_barplot(mdf_GP, cdf_GP) +
+    ggtitle(title_text) +
+    ylab(y_text)
+  legend <- tax_barplot_legend(mdf_GP, 
+                               cdf_GP, 
+                               tax_subgroup)
+  my_list <- list(Metadata = pseq_meta,
+                  OTUTable = pseq_otu,
+                  Taxonomy = pseq_tax,
+                  TaxBarplot = main_barplot,
+                  TaxLegend = legend)
+  return(my_list)
+}
+```
+
+**Testing my mini-pipeline with neonatal gut microbiome data**
+oh my god it worked!!
+```{r, fig.width=25,fig.height=15}
+## inputs
+metadata_FP <- '../data/misc/merged_metadata1.tsv'
+seq_depth_FP <- '../data/misc/tss_seq_depth.tsv'
+unweighted_FP <- '../data/qiime/core_outputs/unweighted_unifrac_pcoa_results.qza'
+weighted_FP <- '../data/qiime/core_outputs/weighted_unifrac_pcoa_results.qza'
+faith_pd_FP <- '../data/qiime/core_outputs/faith_pd.tsv'
+shannon_FP <- '../data/qiime/core_outputs/shannon_entropy.tsv'
+tax_FP <- '../data/qiime/taxonomy.qza'
+sample_asv_FP <- '../data/misc/tss_sample_asv.tsv'
+otu_table_FP <- '../data/qiime/taxonomy_filtered.qza'
+tss_tax_rank <- "Phylum"
+tss_tax_subgroup <- "Family"
+tss_title <- 'Total Sum Scaled Taxa Barplot'
+tss_y <- 'Relative Abundance'
+tss_diet_labs <- 
+  c('Chow', 
+    'High Fat / High Fiber', 
+    'High Fat / Low Fiber', 
+    'Low Fat / High Fiber', 
+    'Low Fat / Low Fiber')
+
+names(tss_diet_labs) <- c('Chow', 
+                          'HF/HF', 
+                          'HF/LF', 
+                          'LF/HF', 
+                          'LF/LF')
+
+## barplot function
+tss_barplot_files <- microshades_tax_barplot(metadata_FP, 
+                                       otu_table_FP, 
+                                       tax_FP,
+                                       tss_tax_rank, 
+                                       tss_tax_subgroup,
+                                       tss_title, 
+                                       tss_y) 
+
+main_barplot <- tss_barplot_files$TaxBarplot
+legend <- tss_barplot_files$TaxLegend
+
+tax_all <- plot_grid(main_barplot, 
+                     legend,  
+                     rel_widths = c(1, .25),
+                     align = 'tblr',
+                     axis = 'tblr')
+tax_all
+```
+
+
